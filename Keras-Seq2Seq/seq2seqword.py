@@ -2,7 +2,7 @@ import re
 
 import numpy as np
 from keras.models import Model
-from keras.layers import Input, LSTM, Dense, Embedding, TimeDistributed
+from keras.layers import Input, LSTM, Dense, Embedding, TimeDistributed, dot, Activation, concatenate
 
 
 class Seq2Seq:
@@ -36,20 +36,30 @@ class Seq2Seq:
         self.encoder_emb = Embedding(self.src_vocab_size, self.encoder_size)(self.econder_input)
 
         # Encoder
-        encoder = LSTM(self.encoder_size, return_state=True)
-        _, encoder_state_h, encoder_state_c = encoder(self.encoder_emb)
-        self.encoder_states = [encoder_state_h, encoder_state_c]
+        encoder = LSTM(self.encoder_size, return_sequences=True)
+        encoder = encoder(self.encoder_emb)
+        encoder_state = encoder[:, -1, :]
+        self.encoder_states = [encoder_state, encoder_state]
 
         # Decoder Input
         self.decoder_input = Input(shape=(None,))
         self.decoder_emb = Embedding(self.tgt_vocab_size, self.decoder_size)(self.decoder_input)
         # Decoder
-        self.decoder = LSTM(self.decoder_size, return_state=True, return_sequences=True)
-        decoder_output, _, _ = self.decoder(self.decoder_emb, initial_state=self.encoder_states)
+        self.decoder = LSTM(self.decoder_size, return_sequences=True)
+        dec = self.decoder(self.decoder_emb, initial_state=self.encoder_states)
+
+        attention = dot([dec, encoder], axes=[2, 2])
+        attention = Activation('softmax')(attention)
+
+        context = dot([attention, encoder], axes=[2,1])
+        decoder_combined_context = concatenate([context, dec])
+
+        # Has another weight + tanh layer as described in equation (5) of the paper
+        output = TimeDistributed(Dense(64, activation="tanh"))(decoder_combined_context) # equation (5) of the paper
 
         # Activation
         self.decoder_dense = TimeDistributed(Dense(self.tgt_vocab_size, activation='softmax'))
-        decoder_output = self.decoder_dense(decoder_output)
+        decoder_output = self.decoder_dense(output)
 
         return Model([self.econder_input, self.decoder_input], decoder_output)
 
@@ -66,7 +76,8 @@ class Seq2Seq:
         model.fit([encoder_input_data, decoder_input_data], decoder_target_data,
                     batch_size=batch_size,
                     epochs=epochs,
-                    validation_split=0.2
+                    validation_split=0.2,
+                    shuffle=True
                     )
         # model.save('s2s.h5')
     
@@ -116,6 +127,32 @@ class Seq2Seq:
             states_value = [state_h, state_c]
         
         return decoded_sequence
+    
+    def predict2(self, model, input_seq, dict_target, vocab_target, max_output_len):
+        # sequência de saída
+        tgt_seq = np.zeros((1,1))
+        # adicionar o caracter de start
+        tgt_seq[0,0] = dict_target['<GO>']
+
+        decoded_sequence = ''
+        stop = False
+
+        while not stop:
+            output_token = model.predict([input_seq, tgt_seq]).argmax(axis=2)
+            #input(output_token)
+            # converter token para caracter
+            sampled_char = vocab_target[output_token[0,0]]
+            decoded_sequence += ' ' + sampled_char
+
+            # verificar se chegou no fim da sentença ou no limite de tamanho
+            if (sampled_char == '<EOS>' or len(decoded_sequence) > max_output_len):
+                stop = True
+
+            # atualizar a entrada do decoder
+            tgt_seq = np.zeros((1,1))
+            tgt_seq[0,0] = output_token[0,0]
+        
+        return decoded_sequence
 
 data_path = 'por.txt'
 
@@ -128,8 +165,8 @@ vocab_target = ['<PAD>', '<EOS>', '<GO>', '<UNK>', '.', ',', '!', '?', ' ']
 vocab_src_size = 0
 vocab_target_size = 0
 
-#num_samples = 10000
-num_samples = 200
+num_samples = 10100
+#num_samples = 500
 
 # criando dicionários
 with open(data_path, 'r', encoding='utf-8') as data_file:
@@ -141,7 +178,7 @@ with open(data_path, 'r', encoding='utf-8') as data_file:
         tgt = pontuacao.sub(r' \1', tgt)
 
         src += ' <EOS>' 
-        tgt = '<PAD> ' + tgt + ' <EOS>'
+        tgt = '<GO> ' + tgt + ' <EOS>'
 
         src_data.append(src)
         target_data.append(tgt)
@@ -177,19 +214,17 @@ for i, (data_in, data_out) in enumerate(zip(src_data, target_data)):
         if t != 0:
             decoder_target_data[i, t-1, 0] = dict_target[c]
 
-print(vocab_target_size)
-print(encoder_input_data[0:1].shape)
-
 seq2seq = Seq2Seq(vocab_src_size, vocab_target_size, 256, 256)
 modelo = seq2seq.model()
 
 modelo.summary()
 
-seq2seq.train(modelo, encoder_input_data, decoder_input_data, decoder_target_data, 64, 100)
+seq2seq.train(modelo, encoder_input_data[:num_samples-100], decoder_input_data[:num_samples-100], decoder_target_data[:num_samples-100], 64, 200)
 
-for i in range(100):
+for i in range(num_samples-100, num_samples):
 
     print("In: ", src_data[i])
     print("Target: ", target_data[i])
-    print("Predict: ", seq2seq.predict(encoder_input_data[i:i+1], dict_target, vocab_target, max_output_len))
+    print("Predict2: ", seq2seq.predict2(modelo, encoder_input_data[i:i+1], dict_target, vocab_target, max_output_len))
+    # print("Predict: ", seq2seq.predict(encoder_input_data[i:i+1], dict_target, vocab_target, max_output_len))
     print('')
