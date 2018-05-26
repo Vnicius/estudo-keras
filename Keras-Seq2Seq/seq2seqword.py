@@ -3,7 +3,7 @@ from math import log
 
 import numpy as np
 from keras.models import Model
-from keras.layers import Input, LSTM, Dense, Embedding, TimeDistributed, dot, Activation, concatenate
+from keras.layers import Input, LSTM, Dense, Embedding, TimeDistributed, dot, Activation, concatenate, Bidirectional, Concatenate, Add
 
 
 class Seq2Seq:
@@ -24,51 +24,12 @@ class Seq2Seq:
         self.encoder_emb = None
         self.encoder_states = None
         self.encoder_model = None
-        self.encoder_seq = None
 
         self.decoder = None
         self.decoder_input = None
         self.decoder_emb = None
         self.decoder_dense = None
         self.decoder_model = None
-
-        self.attention = None
-        self.attention_dot = None
-        self.attention_dense = None
-
-    def model_attention(self):
-        # Camada de Input do encoder
-        self.econder_input = Input(shape=(None,))
-        self.encoder_emb = Embedding(self.src_vocab_size, self.encoder_size)(self.econder_input)
-
-        # Encoder
-        encoder = LSTM(self.encoder_size, return_sequences=True, return_state=True)
-        self.encoder_seq, encoder_state_h, encoder_state_c = encoder(self.encoder_emb)
-        self.encoder_states = [encoder_state_h, encoder_state_c]
-
-        # Decoder Input
-        self.decoder_input = Input(shape=(None,))
-        self.decoder_emb = Embedding(self.tgt_vocab_size, self.decoder_size)(self.decoder_input)
-        # Decoder
-        self.decoder = LSTM(self.decoder_size, return_sequences=True, return_state=True)
-        dec, _, _ = self.decoder(self.decoder_emb, initial_state=self.encoder_states)
-
-        self.attention_dot = dot([dec, self.encoder_seq], axes=[2, 2])
-        self.attention = Activation('softmax')
-        attention_out = self.attention(self.attention_dot)
-
-        context = dot([attention_out, self.encoder_seq], axes=[2,1])
-        decoder_combined_context = concatenate([context, dec])
-
-        # Has another weight + tanh layer as described in equation (5) of the paper
-        self.attention_dense = TimeDistributed(Dense(64, activation="tanh"))
-        output = self.attention_dense(decoder_combined_context) # equation (5) of the paper
-
-        # Activation
-        self.decoder_dense = TimeDistributed(Dense(self.tgt_vocab_size, activation='softmax'))
-        decoder_output = self.decoder_dense(output)
-
-        return Model([self.econder_input, self.decoder_input], decoder_output)
 
     def model(self):
         # Camada de Input do encoder
@@ -93,6 +54,273 @@ class Seq2Seq:
 
         return Model([self.econder_input, self.decoder_input], decoder_output)
 
+    def model_bidirectional(self):
+        # Camada de Input do encoder
+        self.econder_input = Input(shape=(None,))
+        self.encoder_emb = Embedding(self.src_vocab_size, self.encoder_size)(self.econder_input)
+
+        # Encoder
+        encoder = Bidirectional(LSTM(self.encoder_size, return_state=True), merge_mode='sum')
+        _, forward_h, forward_c, backward_h, backward_c = encoder(self.encoder_emb)
+        encoder_state_h = Concatenate()([forward_h, backward_h])
+        encoder_state_c = Concatenate()([forward_c, backward_c])
+        self.encoder_states = [encoder_state_h, encoder_state_c]
+
+        # Decoder Input
+        self.decoder_input = Input(shape=(None,))
+        self.decoder_emb = Embedding(self.tgt_vocab_size, self.decoder_size)(self.decoder_input)
+        # Decoder
+        self.decoder = LSTM(self.decoder_size * 2, return_sequences=True, return_state=True)
+        decoder_output, _, _ = self.decoder(self.decoder_emb, initial_state=self.encoder_states)
+
+        # Activation
+        self.decoder_dense = TimeDistributed(Dense(self.tgt_vocab_size, activation='softmax'))
+        decoder_output = self.decoder_dense(decoder_output)
+
+        return Model([self.econder_input, self.decoder_input], decoder_output)
+
+    def model_deep(self, deep_size=3):
+        # Camada de Input do encoder
+        self.econder_input = Input(shape=(None,))
+        self.encoder_emb = Embedding(self.src_vocab_size, self.encoder_size)(self.econder_input)
+
+        # Encoder
+        seq = self.encoder_emb
+        i = 1
+
+        while i < deep_size:
+            seq = LSTM(self.encoder_size, return_sequences=True, name='Encoder-'+str(i))(seq)
+            i += 1
+
+        encoder = LSTM(self.encoder_size, return_state=True, name='Encoder-'+str(deep_size))
+        _, encoder_state_h, encoder_state_c = encoder(seq)
+
+        self.encoder_states = [encoder_state_h, encoder_state_c]
+
+        # Decoder Input
+        self.decoder_input = Input(shape=(None,))
+        self.decoder_emb = Embedding(self.tgt_vocab_size, self.decoder_size)(self.decoder_input)
+        
+        # Decoder
+        seq = self.decoder_emb
+        i = 1
+
+        while i < deep_size:
+            seq = LSTM(self.decoder_size, return_sequences=True, name='Decoder-'+str(i))(seq)
+            i += 1
+
+        self.decoder = LSTM(self.decoder_size, return_sequences=True, return_state=True, name='Decoder-'+str(deep_size))
+        decoder_output, _, _ = self.decoder(seq, initial_state=self.encoder_states)
+
+        # Activation
+        self.decoder_dense = TimeDistributed(Dense(self.tgt_vocab_size, activation='softmax'))
+        decoder_output = self.decoder_dense(decoder_output)
+
+        return Model([self.econder_input, self.decoder_input], decoder_output)
+
+    def model_bidirectional_deep(self, deep_size=3):
+        # Camada de Input do encoder
+        self.econder_input = Input(shape=(None,))
+        self.encoder_emb = Embedding(self.src_vocab_size, self.encoder_size)(self.econder_input)
+
+       # Encoder
+        seq = self.encoder_emb
+        i = 1
+
+        while i < deep_size:
+            seq = Bidirectional(LSTM(self.encoder_size, return_sequences=True), merge_mode='sum', name='Encoder-'+str(i))(seq)
+            i += 1
+
+        encoder = Bidirectional(LSTM(self.encoder_size, return_state=True), merge_mode='sum', name='Encoder-'+str(deep_size))
+        _, forward_h, forward_c, backward_h, backward_c = encoder(self.encoder_emb)
+        encoder_state_h = Concatenate()([forward_h, backward_h])
+        encoder_state_c = Concatenate()([forward_c, backward_c])
+        self.encoder_states = [encoder_state_h, encoder_state_c]
+
+        # Decoder Input
+        self.decoder_input = Input(shape=(None,))
+        self.decoder_emb = Embedding(self.tgt_vocab_size, self.decoder_size)(self.decoder_input)
+        seq = self.decoder_emb
+        i = 1
+
+        while i < deep_size:
+            seq = LSTM(self.encoder_size * 2, return_sequences=True, name='Decoder-'+str(i))(seq)
+            i += 1
+
+        self.decoder = LSTM(self.decoder_size * 2, return_sequences=True, return_state=True, name='Decoder-'+str(deep_size))
+        decoder_output, _, _ = self.decoder(seq, initial_state=self.encoder_states)
+
+        # Activation
+        self.decoder_dense = TimeDistributed(Dense(self.tgt_vocab_size, activation='softmax'))
+        decoder_output = self.decoder_dense(decoder_output)
+
+        return Model([self.econder_input, self.decoder_input], decoder_output)
+
+    def model_attention(self):
+        # Camada de Input do encoder
+        self.econder_input = Input(shape=(None,))
+        self.encoder_emb = Embedding(self.src_vocab_size, self.encoder_size)(self.econder_input)
+
+        # Encoder
+        encoder = LSTM(self.encoder_size, return_sequences=True, return_state=True)
+        encoder_seq, encoder_state_h, encoder_state_c = encoder(self.encoder_emb)
+        self.encoder_states = [encoder_state_h, encoder_state_c]
+
+        # Decoder Input
+        self.decoder_input = Input(shape=(None,))
+        self.decoder_emb = Embedding(self.tgt_vocab_size, self.decoder_size)(self.decoder_input)
+        # Decoder
+        self.decoder = LSTM(self.decoder_size, return_sequences=True, return_state=True)
+        dec, _, _ = self.decoder(self.decoder_emb, initial_state=self.encoder_states)
+
+        attention = dot([dec, encoder_seq], axes=[2, 2])
+        attention = Activation('softmax')(attention)
+
+        context = dot([attention, encoder_seq], axes=[2,1])
+        decoder_combined_context = concatenate([context, dec])
+
+        # Has another weight + tanh layer as described in equation (5) of the paper
+        attention_dense = TimeDistributed(Dense(64, activation="tanh"))
+        output = attention_dense(decoder_combined_context) # equation (5) of the paper
+
+        # Activation
+        self.decoder_dense = TimeDistributed(Dense(self.tgt_vocab_size, activation='softmax'))
+        decoder_output = self.decoder_dense(output)
+
+        return Model([self.econder_input, self.decoder_input], decoder_output)
+
+    def model_bidirectional_att(self):
+        # Camada de Input do encoder
+        self.econder_input = Input(shape=(None,))
+        self.encoder_emb = Embedding(self.src_vocab_size, self.encoder_size)(self.econder_input)
+
+        # Encoder
+        encoder = Bidirectional(LSTM(self.encoder_size, return_sequences=True, return_state=True), merge_mode='sum')
+        encoder_seq, forward_h, forward_c, backward_h, backward_c = encoder(self.encoder_emb)
+        encoder_state_h = Add()([forward_h, backward_h])
+        encoder_state_c = Add()([forward_c, backward_c])
+        self.encoder_states = [encoder_state_h, encoder_state_c]
+        
+        # Decoder Input
+        self.decoder_input = Input(shape=(None,))
+        self.decoder_emb = Embedding(self.tgt_vocab_size, self.decoder_size)(self.decoder_input)
+        # Decoder
+        self.decoder = LSTM(self.decoder_size, return_sequences=True, return_state=True)
+        decoder_output, _, _ = self.decoder(self.decoder_emb, initial_state=self.encoder_states)
+
+        attention = dot([decoder_output, encoder_seq], axes=[2, 2])
+        attention = Activation('softmax')(attention)
+
+        context = dot([attention, encoder_seq], axes=[2,1])
+        decoder_combined_context = concatenate([context, decoder_output])
+
+        # Has another weight + tanh layer as described in equation (5) of the paper
+        attention_dense = TimeDistributed(Dense(64, activation="tanh"))
+        output = attention_dense(decoder_combined_context) # equation (5) of the paper
+
+        # Activation
+        self.decoder_dense = TimeDistributed(Dense(self.tgt_vocab_size, activation='softmax'))
+        decoder_output = self.decoder_dense(output)
+
+        return Model([self.econder_input, self.decoder_input], decoder_output)
+    
+    def model_deep_att(self, deep_size=3):
+        # Camada de Input do encoder
+        self.econder_input = Input(shape=(None,))
+        self.encoder_emb = Embedding(self.src_vocab_size, self.encoder_size)(self.econder_input)
+
+        # Encoder
+        seq = self.encoder_emb
+        i = 1
+
+        while i < deep_size:
+            seq = LSTM(self.encoder_size, return_sequences=True, name='Encoder-'+str(i))(seq)
+            i += 1
+
+        encoder = LSTM(self.encoder_size, return_sequences=True ,return_state=True, name='Encoder-'+str(deep_size))
+        encoder_seq, encoder_state_h, encoder_state_c = encoder(seq)
+
+        self.encoder_states = [encoder_state_h, encoder_state_c]
+
+        # Decoder Input
+        self.decoder_input = Input(shape=(None,))
+        self.decoder_emb = Embedding(self.tgt_vocab_size, self.decoder_size)(self.decoder_input)
+        
+        # Decoder
+        seq = self.decoder_emb
+        i = 1
+
+        while i < deep_size:
+            seq = LSTM(self.decoder_size, return_sequences=True, name='Decoder-'+str(i))(seq)
+            i += 1
+
+        self.decoder = LSTM(self.decoder_size, return_sequences=True, return_state=True, name='Decoder-'+str(deep_size))
+        decoder_output, _, _ = self.decoder(seq, initial_state=self.encoder_states)
+
+        attention = dot([decoder_output, encoder_seq], axes=[2, 2])
+        attention = Activation('softmax')(attention)
+
+        context = dot([attention, encoder_seq], axes=[2,1])
+        decoder_combined_context = concatenate([context, decoder_output])
+
+        # Has another weight + tanh layer as described in equation (5) of the paper
+        attention_dense = TimeDistributed(Dense(64, activation="tanh"))
+        output = attention_dense(decoder_combined_context) # equation (5) of the paper
+
+        # Activation
+        self.decoder_dense = TimeDistributed(Dense(self.tgt_vocab_size, activation='softmax'))
+        decoder_output = self.decoder_dense(output)
+
+        return Model([self.econder_input, self.decoder_input], decoder_output)
+    
+    def model_bidirectional_deep_att(self, deep_size=3):
+        # Camada de Input do encoder
+        self.econder_input = Input(shape=(None,))
+        self.encoder_emb = Embedding(self.src_vocab_size, self.encoder_size)(self.econder_input)
+
+       # Encoder
+        seq = self.encoder_emb
+        i = 1
+
+        while i < deep_size:
+            seq = Bidirectional(LSTM(self.encoder_size, return_sequences=True), merge_mode='sum', name='Encoder-'+str(i))(seq)
+            i += 1
+
+        encoder = Bidirectional(LSTM(self.encoder_size, return_sequences=True, return_state=True), merge_mode='sum', name='Encoder-'+str(deep_size))
+        encoder_seq, forward_h, forward_c, backward_h, backward_c = encoder(self.encoder_emb)
+        encoder_state_h = Add()([forward_h, backward_h])
+        encoder_state_c = Add()([forward_c, backward_c])
+        self.encoder_states = [encoder_state_h, encoder_state_c]
+
+        # Decoder Input
+        self.decoder_input = Input(shape=(None,))
+        self.decoder_emb = Embedding(self.tgt_vocab_size, self.decoder_size)(self.decoder_input)
+        seq = self.decoder_emb
+        i = 1
+
+        while i < deep_size:
+            seq = LSTM(self.encoder_size * 2, return_sequences=True, name='Decoder-'+str(i))(seq)
+            i += 1
+
+        self.decoder = LSTM(self.decoder_size, return_sequences=True, return_state=True, name='Decoder-'+str(deep_size))
+        decoder_output, _, _ = self.decoder(seq, initial_state=self.encoder_states)
+
+        attention = dot([decoder_output, encoder_seq], axes=[2, 2])
+        attention = Activation('softmax')(attention)
+
+        context = dot([attention, encoder_seq], axes=[2,1])
+        decoder_combined_context = concatenate([context, decoder_output])
+
+        # Has another weight + tanh layer as described in equation (5) of the paper
+        attention_dense = TimeDistributed(Dense(64, activation="tanh"))
+        output = attention_dense(decoder_combined_context) # equation (5) of the paper
+
+        # Activation
+        self.decoder_dense = TimeDistributed(Dense(self.tgt_vocab_size, activation='softmax'))
+        decoder_output = self.decoder_dense(output)
+
+        return Model([self.econder_input, self.decoder_input], decoder_output)
+
     def train(self,
             model,
             encoder_input_data,
@@ -107,7 +335,8 @@ class Seq2Seq:
                     batch_size=batch_size,
                     epochs=epochs,
                     validation_split=0.2,
-                    shuffle=True
+                    shuffle=True,
+                    verbose=2
                     )
         # model.save('s2s.h5')
     
@@ -312,7 +541,7 @@ class Seq2Seq:
         
         return decoded_sequences
 
-data_path = 'por2.txt'
+data_path = 'por.txt'
 
 pontuacao = re.compile('([\.,\?!])')
 
@@ -324,6 +553,7 @@ vocab_src_size = 0
 vocab_target_size = 0
 
 #num_samples = 10100
+test_samples = 100
 num_samples = 660
 
 # criando dicionários
@@ -374,13 +604,19 @@ for i, (data_in, data_out) in enumerate(zip(src_data, target_data)):
 
 seq2seq = Seq2Seq(vocab_src_size, vocab_target_size, 256, 256)
 #modelo = seq2seq.model()
-modelo = seq2seq.model_attention()
+#modelo = seq2seq.model_bidirectional()
+#modelo = seq2seq.model_deep()
+#modelo = seq2seq.model_bidirectional_deep()
+#modelo = seq2seq.model_attention()
+#modelo = seq2seq.model_bidirectional_att()
+#modelo = seq2seq.model_deep_att()
+modelo = seq2seq.model_bidirectional_deep_att()
 
 modelo.summary()
 
-seq2seq.train(modelo, encoder_input_data[:num_samples-100], decoder_input_data[:num_samples-100], decoder_target_data[:num_samples-100], 64, 200)
+seq2seq.train(modelo, encoder_input_data[:num_samples-test_samples], decoder_input_data[:num_samples-test_samples], decoder_target_data[:num_samples-test_samples], 64, 100)
 
-for i in range(num_samples-100, num_samples):
+for i in range(num_samples-test_samples, num_samples):
 
     print("In: ", src_data[i])
     print("Target: ", target_data[i])
